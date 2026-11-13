@@ -8,7 +8,7 @@ import android.database.sqlite.SQLiteOpenHelper
 import ar.edu.examen.iiot.model.Reading
 
 class PlantDatabase(context: Context) :
-    SQLiteOpenHelper(context, "planta_iiot.db", null, 1) {
+    SQLiteOpenHelper(context.applicationContext, DATABASE_NAME, null, DATABASE_VERSION) {
 
     override fun onCreate(db: SQLiteDatabase) {
         db.execSQL(
@@ -26,12 +26,24 @@ class PlantDatabase(context: Context) :
         db.execSQL(
             "CREATE TABLE configuration (config_key TEXT PRIMARY KEY, config_value TEXT NOT NULL)"
         )
+        createHistoryIndex(db)
     }
 
+    /**
+     * Migraciones incrementales. Antes se hacía DROP TABLE + onCreate, lo que borraba
+     * todas las lecturas y la configuración del usuario en cada cambio de versión.
+     */
     override fun onUpgrade(db: SQLiteDatabase, oldVersion: Int, newVersion: Int) {
-        db.execSQL("DROP TABLE IF EXISTS readings")
-        db.execSQL("DROP TABLE IF EXISTS configuration")
-        onCreate(db)
+        if (oldVersion < 2) {
+            createHistoryIndex(db)
+        }
+    }
+
+    /** v2: índice para la consulta de historial por equipo (crece con cada sincronización). */
+    private fun createHistoryIndex(db: SQLiteDatabase) {
+        db.execSQL(
+            "CREATE INDEX IF NOT EXISTS idx_readings_machine_time ON readings (machine_id, captured_at)"
+        )
     }
 
     fun insert(reading: Reading) {
@@ -59,6 +71,10 @@ class PlantDatabase(context: Context) :
         return readableDatabase.rawQuery(sql, null).use(::readAll)
     }
 
+    /**
+     * Antes concatenaba el texto del usuario en el SQL ('%$filter%'): SQL injection y crash con
+     * un apóstrofo. Ahora el valor viaja como parámetro y se escapan los comodines de LIKE.
+     */
     fun findLatestByName(filter: String): List<Reading> {
         val sql = """SELECT r.id, r.machine_id, r.machine_name,
                    r.temperature, r.humidity, r.vibration, r.captured_at, r.source
@@ -67,10 +83,43 @@ class PlantDatabase(context: Context) :
                        SELECT machine_id, MAX(id) AS latest_id
                        FROM readings GROUP BY machine_id
                    ) x ON r.id = x.latest_id
-                   WHERE r.machine_name LIKE '%$filter%'
+                   WHERE r.machine_name LIKE ? ESCAPE '\'
                    ORDER BY r.machine_name""".trimIndent()
-        return readableDatabase.rawQuery(sql, null).use(::readAll)
+        val pattern = "%" + escapeLike(filter) + "%"
+        return readableDatabase.rawQuery(sql, arrayOf(pattern)).use(::readAll)
     }
+
+    /** Últimas lecturas de un equipo, de la más reciente a la más antigua. */
+    fun history(machineId: String, limit: Int): List<Reading> {
+        // limit es un Int de la app (no texto del usuario); machineId sí va como parámetro.
+        val sql = """SELECT id, machine_id, machine_name,
+                   temperature, humidity, vibration, captured_at, source
+                   FROM readings
+                   WHERE machine_id = ?
+                   ORDER BY captured_at DESC, id DESC
+                   LIMIT $limit""".trimIndent()
+        return readableDatabase.rawQuery(sql, arrayOf(machineId)).use(::readAll)
+    }
+
+    fun readConfig(key: String): String? =
+        readableDatabase.rawQuery(
+            "SELECT config_value FROM configuration WHERE config_key = ?",
+            arrayOf(key)
+        ).use { cursor -> if (cursor.moveToFirst()) cursor.getString(0) else null }
+
+    /** La tabla configuration no tiene claves foráneas: reemplazar la fila es seguro. */
+    fun writeConfig(key: String, value: String) {
+        val values = ContentValues().apply {
+            put("config_key", key)
+            put("config_value", value)
+        }
+        writableDatabase.insertWithOnConflict(
+            "configuration", null, values, SQLiteDatabase.CONFLICT_REPLACE
+        )
+    }
+
+    private fun escapeLike(text: String): String =
+        text.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
     private fun readAll(cursor: Cursor): List<Reading> {
         val items = mutableListOf<Reading>()
@@ -87,5 +136,10 @@ class PlantDatabase(context: Context) :
             )
         }
         return items
+    }
+
+    private companion object {
+        const val DATABASE_NAME = "planta_iiot.db"
+        const val DATABASE_VERSION = 2
     }
 }

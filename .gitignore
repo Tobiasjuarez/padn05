@@ -1,0 +1,12 @@
+# Archivos generados por el build y por Android Studio: no se versionan
+.gradle/
+build/
+app/build/
+.idea/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+.kotlin/
+.DS_Store

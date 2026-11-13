@@ -7,9 +7,12 @@ import android.hardware.SensorManager
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.viewModels
-import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.ViewCompositionStrategy
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import ar.edu.examen.iiot.data.PlantRepository
 import ar.edu.examen.iiot.databinding.ActivityMainBinding
 import ar.edu.examen.iiot.ui.DashboardScreen
@@ -26,7 +29,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var movement: Float? = null
 
     private val viewModel: PlantViewModel by viewModels {
-        PlantViewModel.Factory(PlantRepository(this))
+        // applicationContext: el ViewModel sobrevive a la Activity; pasarle "this" la retenía (leak).
+        PlantViewModel.Factory(PlantRepository(applicationContext))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -42,19 +46,26 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed
         )
         binding.composePanel.setContent {
-            val state = viewModel.state.collectAsState().value
+            val state by viewModel.state.collectAsStateWithLifecycle()
             DashboardScreen(
                 state = state,
                 onFilterChanged = viewModel::filter,
                 onThresholdClick = viewModel::configureThreshold,
+                onThresholdInputChange = viewModel::onThresholdInputChange,
+                onSaveThreshold = viewModel::saveThreshold,
+                onDismissThreshold = viewModel::dismissThresholdEditor,
                 onHistoryClick = viewModel::showHistory,
+                onCloseHistory = viewModel::closeHistory,
                 onDismissNotification = viewModel::dismissNotification
             )
         }
+        // La parte XML solo escucha mientras la pantalla está visible (antes seguía en segundo plano).
         lifecycleScope.launch {
-            viewModel.state.collectLatest { state ->
-                binding.txtConnection.text = state.syncMessage
-                binding.btnRefresh.isEnabled = !state.loading
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                viewModel.state.collectLatest { state ->
+                    binding.txtConnection.text = state.syncMessage
+                    binding.btnRefresh.isEnabled = !state.loading
+                }
             }
         }
     }
